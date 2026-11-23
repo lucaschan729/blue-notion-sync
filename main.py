@@ -125,9 +125,10 @@ def parse_pdf(path):
                 value = round(float(v[:-1]) / 100, 4)
             else:
                 fail(path, full, f"看不懂的數值：{v}")
-            if label in cells:
-                fail(path, full, f"保單年度 {label} 出現兩次")
-            cells[label] = (y1 if y1 == y2 else f"{y1}-{y2}", value)
+                        item = (y1 if y1 == y2 else f"{y1}-{y2}", value)
+            if label in cells and cells[label] != item:
+                fail(path, full, f"保單年度 {label} 的中英文表格數值不一致")
+            cells[label] = item
         if hit and not rtype:
             t = re.search(r"Fulfillment\s+Ratio\s+for\s+(Terminal|Reversionary|Annual)", text, flags=re.I)
             rtype = TYPES[t.group(1).lower()] if t else ""
