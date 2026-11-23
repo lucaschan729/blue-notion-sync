@@ -25,6 +25,7 @@ HEADERS = {
 SOURCE_PAGE = "https://www.blue.com.hk/hk/participating_policies"
 CJK = r"\u3000-\u303f\u4e00-\u9fff\uff00-\uffef"
 LINE_RE = re.compile(r"^\d{1,2}/\d{1,2}/(\d{4})\s+\d{1,2}/\d{1,2}/(\d{4})\s+(\d{1,2}\+?)\s+(.+)$")
+TYPE_RE = re.compile(r"for\s+(Terminal|Reversionary|Annual)\s+(?:Bonus|Dividend)", flags=re.I)
 TYPES = {"terminal": "終期紅利", "reversionary": "歸原紅利", "annual": "週年紅利"}
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 AUTO = "自動生成"
@@ -92,8 +93,8 @@ def category(name):
 
 def fail(path, text, why):
     print(f"✗ {os.path.basename(path)}：{why}")
-    print("--- PDF 文字（前 80 行） ---")
-    for line in text.splitlines()[:80]:
+    print("--- PDF 文字（前 120 行） ---")
+    for line in text.splitlines()[:120]:
         print(line)
     raise SystemExit(1)
 
@@ -119,18 +120,18 @@ def parse_pdf(path):
             if len(vals) != 1:
                 fail(path, full, f"保單年度 {label} 有 {len(vals)} 個數值，版面可能改了")
             v = vals[0]
-            if v.upper() in ("N/A", "NA"):
+            if v.upper() in ("N/A", "NA") or v == "不適用":
                 value = "/"
             elif re.fullmatch(r"\d+(\.\d+)?%", v):
                 value = round(float(v[:-1]) / 100, 4)
             else:
                 fail(path, full, f"看不懂的數值：{v}")
-                        item = (y1 if y1 == y2 else f"{y1}-{y2}", value)
+            item = (y1 if y1 == y2 else f"{y1}-{y2}", value)
             if label in cells and cells[label] != item:
                 fail(path, full, f"保單年度 {label} 的中英文表格數值不一致")
             cells[label] = item
         if hit and not rtype:
-            t = re.search(r"Fulfillment\s+Ratio\s+for\s+(Terminal|Reversionary|Annual)", text, flags=re.I)
+            t = TYPE_RE.search(text)
             rtype = TYPES[t.group(1).lower()] if t else ""
     if len(cells) < 5:
         fail(path, full, f"只讀到 {len(cells)} 行資料")
