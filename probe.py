@@ -5,15 +5,30 @@ import urllib.parse
 
 import pdfplumber
 import requests
+from curl_cffi import requests as creq
 
 BASE = "https://www.blue.com.hk"
+HOME = BASE + "/hk"
 PAGE = BASE + "/hk/participating_policies"
 DATA = BASE + "/page-data/hk/participating_policies/page-data.json"
-H = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-     "Accept-Language": "zh-HK,zh;q=0.9"}
+IA = "https://www.ia.org.hk/tc/fulfillment_ratio/list_of_insurer.html"
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+FULL = {"User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "zh-HK,zh;q=0.9,en;q=0.8",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document", "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none", "Sec-Fetch-User": "?1"}
+LANG = {"Accept-Language": "zh-HK,zh;q=0.9,en;q=0.8"}
 KEYS = ["分紅實現率", "實現率", "總現金價值", "現金價值比率", "報告年度", "終期紅利", "不適用", "派息率"]
 WANT = re.compile(r"fulfil|ratio|bonus|dividend|participat|紅利|分紅|實現", re.I)
+
+METHODS = [
+    ("普通連線", lambda u: requests.get(u, headers=FULL, timeout=60)),
+    ("模擬 Chrome", lambda u: creq.get(u, impersonate="chrome", headers=LANG, timeout=60)),
+    ("模擬 Safari", lambda u: creq.get(u, impersonate="safari", headers=LANG, timeout=60)),
+]
 
 
 def plain(s):
@@ -22,15 +37,29 @@ def plain(s):
     return re.sub(r"\s+", " ", htmllib.unescape(s)).strip()
 
 
-def fetch(url):
-    try:
-        r = requests.get(url, headers=H, timeout=60)
-    except Exception as e:
-        print("   ✗ 讀取失敗｜%s｜%s" % (url, e))
-        return ""
-    r.encoding = "utf-8"
-    print("   HTTP %s｜%s｜%d 字元｜%s" % (r.status_code, r.headers.get("Content-Type", ""), len(r.text), url))
-    return r.text if r.status_code == 200 else ""
+def body_text(r):
+    return r.content.decode("utf-8", errors="replace")
+
+
+def try_all(url):
+    """逐個方式嘗試；回傳第一個成功的 (方式, 取用函數, 內容)。"""
+    print("   網址：" + url)
+    for name, get in METHODS:
+        try:
+            r = get(url)
+        except Exception as e:
+            print("   %s｜✗ 連線失敗：%s" % (name, str(e)[:150]))
+            continue
+        text = body_text(r)
+        print("   %s｜HTTP %s｜%d 字元" % (name, r.status_code, len(text)))
+        if r.status_code == 200 and text:
+            return name, get, text
+        for k, v in r.headers.items():
+            if k.lower() != "set-cookie":
+                print("      %s: %s" % (k, str(v)[:100]))
+        if text:
+            print("      內容開頭：" + plain(text)[:200])
+    return None, None, ""
 
 
 def keywords(body):
@@ -42,23 +71,22 @@ def keywords(body):
 
 
 def pdf_links(body):
-    found = re.findall(r"""["'(]([^"'()\s<>]+\.pdf)""", body, flags=re.I)
     out = []
-    for u in found:
+    for u in re.findall(r"""["'(]([^"'()\s<>]+\.pdf)""", body, flags=re.I):
         u = urllib.parse.urljoin(PAGE, u.replace("\\u002F", "/").replace("\\/", "/"))
         if u not in out:
             out.append(u)
     return out
 
 
-def dump_pdf(url):
+def dump_pdf(get, url):
     try:
-        r = requests.get(url, headers=H, timeout=120)
+        r = get(url)
     except Exception as e:
         print("   ✗ 下載失敗：%s" % e)
         return
-    print("   HTTP %s｜%s｜%d KB｜Last-Modified：%s"
-          % (r.status_code, r.headers.get("Content-Type", ""), len(r.content) // 1024, r.headers.get("Last-Modified")))
+    print("   HTTP %s｜%d KB｜Last-Modified：%s"
+          % (r.status_code, len(r.content) // 1024, r.headers.get("Last-Modified")))
     if r.status_code != 200 or not r.content.startswith(b"%PDF"):
         return
     with pdfplumber.open(io.BytesIO(r.content)) as pdf:
@@ -78,16 +106,37 @@ def dump_pdf(url):
 
 
 def main():
-    print("=== 1. 紅利資料頁 ===")
-    body = fetch(PAGE)
-    keywords(body)
+    print("=== 1. 保監局列表（核對微藍的官方網址） ===")
+    try:
+        r = requests.get(IA, headers=FULL, timeout=60)
+        text = body_text(r)
+        print("   HTTP %s｜%d 字元｜%s" % (r.status_code, len(text), IA))
+        n = 0
+        for href, label in re.findall(r'<a\b[^>]*href="([^"]*)"[^>]*>(.*?)</a>', text, flags=re.S | re.I):
+            if re.search(r"blue", href + label, flags=re.I):
+                n += 1
+                print("   %s｜%s" % (plain(label)[:40], href))
+        print("   與 Blue 有關的連結 %d 個" % n)
+    except Exception as e:
+        print("   ✗ 讀取失敗：%s" % e)
 
-    print("\n=== 2. 頁面資料檔（如有） ===")
-    data = fetch(DATA)
-    if data:
-        keywords(data)
+    print("\n=== 2. 微藍首頁（測試哪種連線方式可用） ===")
+    try_all(HOME)
 
-    print("\n=== 3. 相關連結 ===")
+    print("\n=== 3. 紅利資料頁 ===")
+    name, get, body = try_all(PAGE)
+
+    print("\n=== 4. 頁面資料檔（如有） ===")
+    _, get2, data = try_all(DATA)
+    get = get or get2
+
+    if not body and not data:
+        print("\n=== 探查完成：三種方式都讀不到微藍網站，沒有產生 Excel，沒有連接 Notion ===")
+        return
+    print("\n   成功的方式：%s" % (name or "只有資料檔"))
+    keywords(body + " " + data)
+
+    print("\n=== 5. 相關連結 ===")
     n = 0
     for href, label in re.findall(r'<a\b[^>]*href="([^"]*)"[^>]*>(.*?)</a>', body, flags=re.S | re.I):
         label = plain(label)
@@ -98,7 +147,7 @@ def main():
         print("   iframe｜%s" % src)
     print("   相關連結 %d 個" % n)
 
-    print("\n=== 4. 網頁表格 ===")
+    print("\n=== 6. 網頁表格 ===")
     tables = re.findall(r"<table\b.*?</table>", body, flags=re.S | re.I)
     print("   表格 %d 個" % len(tables))
     last = 0
@@ -113,7 +162,7 @@ def main():
         if len(trs) > 12:
             print("      …（另有 %d 行）" % (len(trs) - 12))
 
-    print("\n=== 5. PDF ===")
+    print("\n=== 7. PDF ===")
     pdfs = pdf_links(body + data)
     pdfs.sort(key=lambda u: 0 if WANT.search(urllib.parse.unquote(u)) else 1)
     print("   PDF 連結 %d 個" % len(pdfs))
@@ -121,7 +170,7 @@ def main():
         print("   " + u)
     for u in pdfs[:4]:
         print("\n>>> " + u)
-        dump_pdf(u)
+        dump_pdf(get, u)
 
     print("\n=== 探查完成：沒有產生 Excel，沒有連接 Notion ===")
 
